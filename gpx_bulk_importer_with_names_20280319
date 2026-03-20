@@ -1,0 +1,130 @@
+import bpy
+import xml.etree.ElementTree as ET
+from math import radians, sin, cos
+import os
+
+# --- CONFIGURATION ---
+BASE_RADIUS = 10.0
+HEIGHT_FACTOR = 0.0001  
+BEVEL_SIZE = 0.006     
+MATERIAL_NAME = "GPX_Path_Material"
+MAX_DEPTH = 3  
+
+# -------------------------------------
+# COORDINATE MATH
+# -------------------------------------
+def latlon_to_xyz(lat, lon, r):
+    phi = radians(90 - lat)
+    theta = radians(lon + 180)
+    return (r * sin(phi) * cos(theta), r * sin(phi) * sin(theta), r * cos(phi))
+
+# -------------------------------------
+# GPX PARSING (Brute Force Name Extraction)
+# -------------------------------------
+def parse_gpx(path):
+    try:
+        # We read the file as a string first to strip out namespaces 
+        # which are the #1 cause of "missing" tags in Blender/Python
+        with open(path, 'r', encoding='utf-8') as f:
+            xml_data = f.read()
+        
+        # This removes the xmlns="..." parts so we can just search for "name"
+        import re
+        xml_data = re.sub(' xmlns="[^"]+"', '', xml_data, count=1)
+        root = ET.fromstring(xml_data)
+        
+        gpx_internal_name = None
+        
+        # 1. Brute force search for ANY <name> tag in the file
+        all_names = root.findall(".//name")
+        for n in all_names:
+            if n.text and len(n.text.strip()) > 0:
+                gpx_internal_name = n.text.strip()
+                break # Take the first valid name found
+
+        # 2. Extract coordinates (using wildcards to ignore namespaces)
+        pts = []
+        # Search for any tag ending in trkpt, rtept, or wpt
+        for node in root.iter():
+            if any(suffix in node.tag for suffix in ["trkpt", "rtept", "wpt"]):
+                lat = node.get("lat")
+                lon = node.get("lon")
+                if lat and lon:
+                    pts.append((float(lat), float(lon)))
+        
+        return pts, gpx_internal_name
+    except Exception as e:
+        print(f"Error parsing {path}: {e}")
+        return [], None
+
+# -------------------------------------
+# BUILDER LOGIC
+# -------------------------------------
+def build_scene(root_directory):
+    col_name = "Imported_GPX_Paths"
+    if col_name not in bpy.data.collections:
+        gpx_col = bpy.data.collections.new(col_name)
+        bpy.context.scene.collection.children.link(gpx_col)
+    else:
+        gpx_col = bpy.data.collections[col_name]
+
+    radius = BASE_RADIUS
+    height_offset = radius * HEIGHT_FACTOR
+    root_directory = os.path.normpath(root_directory)
+
+    for root, dirs, files in os.walk(root_directory):
+        rel_path = os.path.relpath(root, root_directory)
+        depth = 0 if rel_path == "." else rel_path.count(os.sep) + 1
+        
+        dirs[:] = [d for d in dirs if not d.startswith(('.', '__', 'node_modules'))]
+        if depth >= MAX_DEPTH:
+            dirs[:] = [] 
+
+        for file in files:
+            if file.lower().endswith(".gpx"):
+                full_path = os.path.join(root, file)
+                pts, internal_name = parse_gpx(full_path)
+                
+                if len(pts) >= 2:
+                    # Final fallback logic
+                    final_name = internal_name if internal_name else file.split('.')[0]
+                    
+                    # Clean up name for Blender (remove characters Blender doesn't like)
+                    final_name = "".join([c for c in final_name if c.isalnum() or c in (' ', '.', '_', '-')]).strip()
+                    
+                    coords = [latlon_to_xyz(lat, lon, radius + height_offset) for lat, lon in pts]
+                    
+                    curve = bpy.data.curves.new(final_name, "CURVE")
+                    curve.dimensions = "3D"
+                    curve.bevel_depth = BEVEL_SIZE
+                    sp = curve.splines.new("POLY")
+                    sp.points.add(len(coords) - 1)
+                    for i, (x, y, z) in enumerate(coords):
+                        sp.points[i].co = (x, y, z, 1)
+                    
+                    obj = bpy.data.objects.new(final_name, curve)
+                    gpx_col.objects.link(obj)
+                    
+                    mat = bpy.data.materials.get(MATERIAL_NAME)
+                    if mat: obj.data.materials.append(mat)
+
+# -------------------------------------
+# UI OPERATOR
+# -------------------------------------
+class MultiGPXPicker(bpy.types.Operator):
+    bl_idname = "wm.multi_gpx"
+    bl_label = "Batch Import (Brute Force Name Fix)"
+    directory: bpy.props.StringProperty(subtype="DIR_PATH")
+
+    def execute(self, context):
+        build_scene(self.directory)
+        self.report({'INFO'}, "Import Complete")
+        return {'FINISHED'}
+
+    def invoke(self, context, event):
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+if __name__ == "__main__":
+    bpy.utils.register_class(MultiGPXPicker)
+    bpy.ops.wm.multi_gpx("INVOKE_DEFAULT")

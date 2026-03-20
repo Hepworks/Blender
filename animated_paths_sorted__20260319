@@ -1,0 +1,45 @@
+import bpy
+import re
+
+# --- SETTINGS ---
+COLLECTION_NAME = "Imported_GPX_Paths"
+FRAMES_PER_PATH = 30  # How long each path takes to draw (1 sec at 30fps)
+START_FRAME = 1
+# ----------------
+
+def animate_sequential_growth():
+    if COLLECTION_NAME not in bpy.data.collections:
+        print(f"Collection {COLLECTION_NAME} not found.")
+        return
+
+    # Get all curves
+    paths = [obj for obj in bpy.data.collections[COLLECTION_NAME].objects if obj.type == 'CURVE']
+
+    # --- UPDATED SORTING LOGIC ---
+    # This regex finds digits in the name and converts them to integers for the sort
+    def natural_sort_key(obj):
+        return [int(s) if s.isdigit() else s.lower() for s in re.split(r'(\d+)', obj.name)]
+
+    paths.sort(key=natural_sort_key)
+    # -----------------------------
+
+    current_frame = START_FRAME
+
+    for obj in paths:
+        curve = obj.data
+        
+        # 1. Set Start: Path is invisible (End = 0)
+        curve.bevel_factor_end = 0.0
+        curve.keyframe_insert(data_path="bevel_factor_end", frame=current_frame)
+        
+        # 2. Set End: Path is fully drawn (End = 1)
+        current_frame += FRAMES_PER_PATH
+        curve.bevel_factor_end = 1.0
+        curve.keyframe_insert(data_path="bevel_factor_end", frame=current_frame)
+        
+        # Optional: Add a small pause or overlap by adjusting current_frame here
+        # current_frame -= 5 # For a 5-frame overlap
+
+    print(f"Sequencing complete! Animation ends at frame {current_frame}")
+
+animate_sequential_growth()
